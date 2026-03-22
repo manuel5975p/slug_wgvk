@@ -46,16 +46,25 @@ if(NOT EXISTS "${STB_DIR}/stb_truetype.h")
     )
 endif()
 
-# --- Build target ---
+# --- Build targets ---
 add_executable(slug_wgvk main.c slug.c)
+add_executable(slug_headless headless.c slug.c)
 target_include_directories(slug_wgvk PRIVATE
     "${STB_DIR}"
     "${WGVK_SOURCE_DIR}/examples"   # for common.h
 )
 target_link_libraries(slug_wgvk PUBLIC wgvk glfw)
 target_compile_features(slug_wgvk PRIVATE c_std_11)
+
+target_include_directories(slug_headless PRIVATE
+    "${STB_DIR}"
+    "${WGVK_SOURCE_DIR}/examples"
+)
+target_link_libraries(slug_headless PUBLIC wgvk glfw)
+target_compile_features(slug_headless PRIVATE c_std_11)
 if(NOT MSVC)
     target_link_libraries(slug_wgvk PUBLIC m)
+    target_link_libraries(slug_headless PUBLIC m)
 endif()
 
 # Copy shader files to build directory so the executable can find them

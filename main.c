@@ -366,7 +366,7 @@ int main(int argc, char **argv)
     };
 
     WGPUBlendState blend = {
-        .color = {.srcFactor = WGPUBlendFactor_SrcAlpha,
+        .color = {.srcFactor = WGPUBlendFactor_One,
                   .dstFactor = WGPUBlendFactor_OneMinusSrcAlpha,
                   .operation = WGPUBlendOperation_Add},
         .alpha = {.srcFactor = WGPUBlendFactor_One,

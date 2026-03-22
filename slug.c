@@ -1,5 +1,6 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "slug.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -54,8 +55,14 @@ static int extract_curves(const stbtt_fontinfo *font, int glyphIndex,
         case STBTT_vline: {
             float dx = x - cx, dy = y - cy;
             if (fabsf(dx) < 0.1f && fabsf(dy) < 0.1f) { cx = x; cy = y; break; }
+            /* Offset control point perpendicular to the line by a tiny amount
+               so the curve is a true (non-degenerate) quadratic. This avoids
+               the linear fallback in SolveHorizPoly/SolveVertPoly which can
+               produce artifacts on some GPU drivers. */
+            float len = sqrtf(dx*dx + dy*dy);
+            float nx = -dy / len * 0.05f, ny = dx / len * 0.05f;
             curves[n++] = (SlugQuadCurve){cx, cy,
-                                          (cx + x) * .5f, (cy + y) * .5f,
+                                          (cx + x) * .5f + nx, (cy + y) * .5f + ny,
                                           x, y};
             cx = x; cy = y;
             break;
@@ -88,6 +95,9 @@ static int extract_curves(const stbtt_fontinfo *font, int glyphIndex,
     }
 
     stbtt_FreeShape(font, verts);
+
+    /* (normal curves from stb_truetype) */
+
     *out_curves = curves;
     return n;
 }
@@ -113,6 +123,17 @@ static void build_bands(SlugQuadCurve *curves, int curveCount,
         out->vBands[i].curveIndices = (int *)malloc(curveCount * sizeof(int));
     }
 
+    /* Precompute the same scale+offset values that the shader uses for
+       pixel-to-band mapping (bandTransform).  Using the identical formula
+       here avoids floating-point rounding mismatches between the CPU band
+       assignment and the GPU pixel lookup, which otherwise cause curves
+       to be absent from bands the shader expects them in – producing
+       horizontal/vertical line artifacts at band boundaries. */
+    float bsX = w > 0 ? (float)bandCount / w : 0;
+    float boX = -bounds->xMin * bsX;
+    float bsY = h > 0 ? (float)bandCount / h : 0;
+    float boY = -bounds->yMin * bsY;
+
     for (int ci = 0; ci < curveCount; ci++) {
         SlugQuadCurve *c = &curves[ci];
         float cyMin = fminf(fminf(c->p0y, c->p1y), c->p2y);
@@ -121,14 +142,14 @@ static void build_bands(SlugQuadCurve *curves, int curveCount,
         float cxMax = fmaxf(fmaxf(c->p0x, c->p1x), c->p2x);
 
         if (h > 0) {
-            int b0 = (int)fmaxf(0, floorf((cyMin - bounds->yMin) / h * bandCount));
-            int b1 = (int)fminf(bandCount - 1, floorf((cyMax - bounds->yMin) / h * bandCount));
+            int b0 = (int)fminf(bandCount - 1, fmaxf(0, floorf(cyMin * bsY + boY)));
+            int b1 = (int)fminf(bandCount - 1, fmaxf(0, floorf(cyMax * bsY + boY)));
             for (int b = b0; b <= b1; b++)
                 out->hBands[b].curveIndices[out->hBands[b].count++] = ci;
         }
         if (w > 0) {
-            int b0 = (int)fmaxf(0, floorf((cxMin - bounds->xMin) / w * bandCount));
-            int b1 = (int)fminf(bandCount - 1, floorf((cxMax - bounds->xMin) / w * bandCount));
+            int b0 = (int)fminf(bandCount - 1, fmaxf(0, floorf(cxMin * bsX + boX)));
+            int b1 = (int)fminf(bandCount - 1, fmaxf(0, floorf(cxMax * bsX + boX)));
             for (int b = b0; b <= b1; b++)
                 out->vBands[b].curveIndices[out->vBands[b].count++] = ci;
         }

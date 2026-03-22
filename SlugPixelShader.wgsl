@@ -48,22 +48,23 @@ fn SolveHorizPoly(p12: vec4<f32>, p3: vec2<f32>) -> vec2<f32> {
 
     let a = vec2<f32>(p12.x - p12.z * 2.0 + p3.x, p12.y - p12.w * 2.0 + p3.y);
     let b = vec2<f32>(p12.x - p12.z, p12.y - p12.w);
-    let ra = 1.0 / a.y;
-    let rb = 0.5 / b.y;
-
-    let d = sqrt(max(b.y * b.y - a.y * p12.y, 0.0));
-    var t1 = (b.y - d) * ra;
-    var t2 = (b.y + d) * ra;
-
-    // If the polynomial is nearly linear, then solve -2b t + c = 0.
 
     if (abs(a.y) < 1.0 / 65536.0) {
-        t1 = p12.y * rb;
-        t2 = p12.y * rb;
+        let t = p12.y * 0.5 / b.y;
+        return vec2<f32>((a.x * t - b.x * 2.0) * t + p12.x, (a.x * t - b.x * 2.0) * t + p12.x);
     }
 
-    // Return the x coordinates where C(t) = 0.
+    let ra = 1.0 / a.y;
+    let disc = b.y * b.y - a.y * p12.y;
 
+    // When the discriminant is near zero (curve nearly tangent to the ray),
+    // GPU FMA precision can cause the two roots to diverge spuriously,
+    // producing wrong coverage.  Treat as a double root in that case.
+    let ref = b.y * b.y + abs(a.y * p12.y);
+    let d = sqrt(max(disc, 0.0)) * step(1e-4 * ref, max(disc, 0.0));
+
+    let t1 = (b.y - d) * ra;
+    let t2 = (b.y + d) * ra;
     return vec2<f32>((a.x * t1 - b.x * 2.0) * t1 + p12.x, (a.x * t2 - b.x * 2.0) * t2 + p12.x);
 }
 
@@ -72,22 +73,19 @@ fn SolveVertPoly(p12: vec4<f32>, p3: vec2<f32>) -> vec2<f32> {
 
     let a = vec2<f32>(p12.x - p12.z * 2.0 + p3.x, p12.y - p12.w * 2.0 + p3.y);
     let b = vec2<f32>(p12.x - p12.z, p12.y - p12.w);
-    let ra = 1.0 / a.x;
-    let rb = 0.5 / b.x;
-
-    let d = sqrt(max(b.x * b.x - a.x * p12.x, 0.0));
-    var t1 = (b.x - d) * ra;
-    var t2 = (b.x + d) * ra;
-
-    // If the polynomial is nearly linear, then solve -2b t + c = 0.
 
     if (abs(a.x) < 1.0 / 65536.0) {
-        t1 = p12.x * rb;
-        t2 = p12.x * rb;
+        let t = p12.x * 0.5 / b.x;
+        return vec2<f32>((a.y * t - b.y * 2.0) * t + p12.y, (a.y * t - b.y * 2.0) * t + p12.y);
     }
 
-    // Return the y coordinates where C(t) = 0.
+    let ra = 1.0 / a.x;
+    let disc = b.x * b.x - a.x * p12.x;
+    let ref = b.x * b.x + abs(a.x * p12.x);
+    let d = sqrt(max(disc, 0.0)) * step(1e-4 * ref, max(disc, 0.0));
 
+    let t1 = (b.x - d) * ra;
+    let t2 = (b.x + d) * ra;
     return vec2<f32>((a.y * t1 - b.y * 2.0) * t1 + p12.y, (a.y * t2 - b.y * 2.0) * t2 + p12.y);
 }
 
