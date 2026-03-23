@@ -58,9 +58,9 @@ target_compile_features(slug_wgvk PRIVATE c_std_11)
 
 target_include_directories(slug_headless PRIVATE
     "${STB_DIR}"
-    "${WGVK_SOURCE_DIR}/examples"
+    "${CMAKE_CURRENT_SOURCE_DIR}"   # for stb_image_write.h
 )
-target_link_libraries(slug_headless PUBLIC wgvk glfw)
+target_link_libraries(slug_headless PUBLIC wgvk)
 target_compile_features(slug_headless PRIVATE c_std_11)
 if(NOT MSVC)
     target_link_libraries(slug_wgvk PUBLIC m)

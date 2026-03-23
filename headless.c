@@ -1,8 +1,8 @@
 /*
- * Headless Slug renderer — renders to an offscreen texture and saves PPM.
- * No window, no surface, no swapchain.
+ * Headless Slug renderer — renders to an offscreen texture and saves PNG/PPM.
+ * No window, no surface, no swapchain.  Uses only webgpu.h — no GLFW.
  */
-#include "common.h"
+#include <webgpu/webgpu.h>
 #include "slug.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +11,78 @@
 #include <ctype.h>
 #include <getopt.h>
 #include <unistd.h>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+#ifndef STRVIEW
+#define STRVIEW(X) (WGPUStringView){X, sizeof(X) - 1}
+#endif
+
+/* Headless WebGPU init — instance + adapter + device + queue, no window. */
+typedef struct {
+    WGPUInstance  instance;
+    WGPUAdapter   adapter;
+    WGPUDevice    device;
+    WGPUQueue     queue;
+} HeadlessGPU;
+
+static void on_adapter(WGPURequestAdapterStatus s, WGPUAdapter a,
+                        WGPUStringView msg, void *u1, void *u2) {
+    (void)s; (void)msg; (void)u2;
+    *(WGPUAdapter *)u1 = a;
+}
+static void on_device(WGPURequestDeviceStatus s, WGPUDevice d,
+                       WGPUStringView msg, void *u1, void *u2) {
+    (void)s; (void)msg; (void)u2;
+    *(WGPUDevice *)u1 = d;
+}
+
+static HeadlessGPU headless_gpu_init(void)
+{
+    HeadlessGPU g = {0};
+
+    WGPUInstanceFeatureName features[] = {
+        WGPUInstanceFeatureName_TimedWaitAny,
+        WGPUInstanceFeatureName_ShaderSourceSPIRV,
+    };
+    WGPUInstanceDescriptor idesc = {
+        .requiredFeatures     = features,
+        .requiredFeatureCount = 2,
+    };
+    g.instance = wgpuCreateInstance(&idesc);
+    if (!g.instance) return g;
+
+    /* Adapter */
+    WGPURequestAdapterOptions aopts = {
+        .featureLevel = WGPUFeatureLevel_Compatibility,
+        .backendType  = WGPUBackendType_WebGPU,
+    };
+    WGPURequestAdapterCallbackInfo acb = {
+        .callback = on_adapter,
+        .mode     = WGPUCallbackMode_WaitAnyOnly,
+        .userdata1 = &g.adapter,
+    };
+    WGPUFuture af = wgpuInstanceRequestAdapter(g.instance, &aopts, acb);
+    WGPUFutureWaitInfo aw = { .future = af };
+    wgpuInstanceWaitAny(g.instance, 1, &aw, 1000000000);
+    if (!g.adapter) return g;
+
+    /* Device */
+    WGPUDeviceDescriptor ddesc = {0};
+    WGPURequestDeviceCallbackInfo dcb = {
+        .callback  = on_device,
+        .mode      = WGPUCallbackMode_WaitAnyOnly,
+        .userdata1 = &g.device,
+    };
+    WGPUFuture df = wgpuAdapterRequestDevice(g.adapter, &ddesc, dcb);
+    WGPUFutureWaitInfo dw = { .future = df };
+    wgpuInstanceWaitAny(g.instance, 1, &dw, 1000000000);
+    if (!g.device) return g;
+
+    g.queue = wgpuDeviceGetQueue(g.device);
+    return g;
+}
 
 static char *read_file(const char *path, size_t *out_size)
 {
@@ -60,17 +132,18 @@ static void print_help(const char *prog)
 {
     printf(
         "Usage: %s [OPTIONS] [TEXT...]\n\n"
-        "Headless Slug GPU text renderer -- renders text to a PPM image.\n\n"
+        "Headless Slug GPU text renderer -- renders text to a PNG or PPM image.\n\n"
         "Options:\n"
         "  -h, --help            Show this help and exit\n"
         "  -f, --font PATH|NAME  Font file or family name (default: sans-serif via fontconfig)\n"
         "  -s, --size PIXELS     Base font size in pixels (default: 200)\n"
         "  -S, --scale FACTOR    Scale multiplier for output (default: 1.0)\n"
-        "  -o, --output PATH     Output file (default: output.ppm)\n"
+        "  -o, --output PATH     Output file (default: output.png)\n"
         "  -W, --width PIXELS    Image width  (default: auto-fit to text)\n"
         "  -H, --height PIXELS   Image height (default: auto-fit to text)\n"
         "  -p, --padding PIXELS  Padding around text (default: 20)\n"
         "\n"
+        "Output format is chosen by file extension: .png (default) or .ppm.\n"
         "Remaining arguments are joined as the text to render.\n"
         "If no text is given, renders \"Hello, Slug!\".\n"
         "\n"
@@ -81,7 +154,7 @@ static void print_help(const char *prog)
         "\n"
         "Examples:\n"
         "  %s Hello World\n"
-        "  %s -f 'DejaVu Sans' -s 100 --scale 2 -o big.ppm \"GPU text\"\n"
+        "  %s -f 'DejaVu Sans' -s 100 --scale 2 -o big.png \"GPU text\"\n"
         "  %s -f /usr/share/fonts/TTF/DejaVuSans.ttf Greetings\n",
         prog, prog, prog, prog);
 }
@@ -95,7 +168,7 @@ static void map_cb(WGPUMapAsyncStatus status, WGPUStringView msg, void *u1, void
 int main(int argc, char **argv)
 {
     const char *fontSpec = NULL;
-    const char *outPath  = "output.ppm";
+    const char *outPath  = "output.png";
     float fontSize       = 200.0f;
     float scaleFactor    = 1.0f;
     int userW = 0, userH = 0;   /* 0 = auto-fit */
@@ -203,11 +276,11 @@ int main(int argc, char **argv)
     const int H = userH > 0 ? userH : (int)ceilf(textHeight + 2.0f * padding);
     fprintf(stderr, "Image: %dx%d\n", W, H);
 
-    /* WGVK headless init — just device+queue, no window */
-    wgpu_base base = wgpu_init();
-    if (!base.device) { fprintf(stderr, "WGVK init failed\n"); return 1; }
-    WGPUDevice device = base.device;
-    WGPUQueue queue = base.queue;
+    /* Headless GPU init — no window, no surface */
+    HeadlessGPU gpu = headless_gpu_init();
+    if (!gpu.device) { fprintf(stderr, "Headless GPU init failed\n"); return 1; }
+    WGPUDevice device = gpu.device;
+    WGPUQueue queue = gpu.queue;
 
     /* Create offscreen render target */
     WGPUTexture rtTex = wgpuDeviceCreateTexture(device,
@@ -404,24 +477,36 @@ int main(int argc, char **argv)
     WGPUBufferMapCallbackInfo mapInfo = { .callback = map_cb, .mode = WGPUCallbackMode_WaitAnyOnly };
     WGPUFuture mapFuture = wgpuBufferMapAsync(readBuf, WGPUMapMode_Read, 0, alignedRow * H, mapInfo);
     WGPUFutureWaitInfo waitInfo = { .future = mapFuture };
-    wgpuInstanceWaitAny(base.instance, 1, &waitInfo, UINT64_MAX);
+    wgpuInstanceWaitAny(gpu.instance, 1, &waitInfo, UINT64_MAX);
 
     if (g_mapped != 1) { fprintf(stderr, "Map failed\n"); return 1; }
 
     const uint8_t *mapped = (const uint8_t *)wgpuBufferGetMappedRange(readBuf, 0, alignedRow * H);
 
-    /* Write PPM */
-    FILE *out = fopen(outPath, "wb");
-    fprintf(out, "P6\n%d %d\n255\n", W, H);
-    for (int y = 0; y < H; y++) {
-        const uint8_t *row = mapped + y * alignedRow;
-        for (int x = 0; x < W; x++) {
-            fputc(row[x*4+0], out); /* R */
-            fputc(row[x*4+1], out); /* G */
-            fputc(row[x*4+2], out); /* B */
+    /* Detect output format by extension */
+    const char *ext = strrchr(outPath, '.');
+    int use_png = (!ext || strcasecmp(ext, ".ppm") != 0);
+
+    if (use_png) {
+        /* Build tightly packed RGBA buffer (stb_image_write needs contiguous rows) */
+        uint8_t *rgba = (uint8_t *)malloc(W * H * 4);
+        for (int y = 0; y < H; y++)
+            memcpy(rgba + y * W * 4, mapped + y * alignedRow, W * 4);
+        stbi_write_png(outPath, W, H, 4, rgba, W * 4);
+        free(rgba);
+    } else {
+        FILE *out = fopen(outPath, "wb");
+        fprintf(out, "P6\n%d %d\n255\n", W, H);
+        for (int y = 0; y < H; y++) {
+            const uint8_t *row = mapped + y * alignedRow;
+            for (int x = 0; x < W; x++) {
+                fputc(row[x*4+0], out);
+                fputc(row[x*4+1], out);
+                fputc(row[x*4+2], out);
+            }
         }
+        fclose(out);
     }
-    fclose(out);
     printf("Wrote %s (%dx%d)\n", outPath, W, H);
 
     /* Cleanup */
